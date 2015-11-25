@@ -434,12 +434,7 @@ var AbrController = (function () {
       }
 
       if (this._nextAutoLevel !== -1) {
-        var nextLevel = Math.min(this._nextAutoLevel, maxAutoLevel);
-        if (nextLevel === this.lastfetchlevel) {
-          this._nextAutoLevel = -1;
-        } else {
-          return nextLevel;
-        }
+        return Math.min(this._nextAutoLevel, maxAutoLevel);
       }
 
       // follow algorithm captured from stagefright :
@@ -471,7 +466,7 @@ var AbrController = (function () {
 exports['default'] = AbrController;
 module.exports = exports['default'];
 
-},{"../events":17}],4:[function(require,module,exports){
+},{"../events":12}],4:[function(require,module,exports){
 /*
  * Level Controller
 */
@@ -544,7 +539,7 @@ var LevelController = (function () {
         }
         var redundantLevelId = bitrateSet[level.bitrate];
         if (redundantLevelId === undefined) {
-          bitrateSet[level.bitrate] = levels0.length;
+          bitrateSet[level.bitrate] = levels.length;
           level.url = [level.url];
           level.urlId = 0;
           levels0.push(level);
@@ -756,7 +751,7 @@ var LevelController = (function () {
 exports['default'] = LevelController;
 module.exports = exports['default'];
 
-},{"../errors":16,"../events":17,"../utils/logger":26}],5:[function(require,module,exports){
+},{"../errors":11,"../events":12,"../utils/logger":21}],5:[function(require,module,exports){
 /*
  * MSE Media Controller
 */
@@ -811,7 +806,6 @@ var MSEMediaController = (function () {
     _classCallCheck(this, MSEMediaController);
 
     this.config = hls.config;
-    this.audioCodecSwap = false;
     this.hls = hls;
     // Source Buffer listeners
     this.onsbue = this.onSBUpdateEnd.bind(this);
@@ -1023,7 +1017,7 @@ var MSEMediaController = (function () {
                   /* we have no idea about which fragment should be loaded.
                      so let's load mid fragment. it will help computing playlist sliding and find the right one
                   */
-                  _frag = fragments[Math.min(fragLen - 1, Math.round(fragLen / 2))];
+                  _frag = fragments[Math.round(fragLen / 2)];
                   _utilsLogger.logger.log('live playlist, switching playlist, unknown, load middle frag : ' + _frag.sn);
                 }
               }
@@ -1034,22 +1028,21 @@ var MSEMediaController = (function () {
               }
             }
             if (!_frag) {
-              var foundFrag;
-              if (bufferEnd < end) {
-                foundFrag = _utilsBinarySearch2['default'].search(fragments, function (candidate) {
-                  //logger.log(`level/sn/start/end/bufEnd:${level}/${candidate.sn}/${candidate.start}/${(candidate.start+candidate.duration)}/${bufferEnd}`);
-                  // offset should be within fragment boundary
-                  if (candidate.start + candidate.duration <= bufferEnd) {
-                    return 1;
-                  } else if (candidate.start > bufferEnd) {
-                    return -1;
-                  }
-                  return 0;
-                });
-              } else {
+              if (bufferEnd > end) {
                 // reach end of playlist
-                foundFrag = fragments[fragLen - 1];
+                break;
               }
+              var foundFrag = _utilsBinarySearch2['default'].search(fragments, function (candidate) {
+                //logger.log('level/sn/sliding/start/end/bufEnd:${level}/${candidate.sn}/${sliding.toFixed(3)}/${candidate.start.toFixed(3)}/${(candidate.start+candidate.duration).toFixed(3)}/${bufferEnd.toFixed(3)}');
+                // offset should be within fragment boundary
+                if (candidate.start + candidate.duration <= bufferEnd) {
+                  return 1;
+                } else if (candidate.start > bufferEnd) {
+                  return -1;
+                }
+                return 0;
+              });
+
               if (foundFrag) {
                 _frag = foundFrag;
                 start = foundFrag.start;
@@ -1059,19 +1052,7 @@ var MSEMediaController = (function () {
                     _frag = fragments[_frag.sn + 1 - levelDetails.startSN];
                     _utilsLogger.logger.log('SN just loaded, load next one: ' + _frag.sn);
                   } else {
-                    // have we reached end of VOD playlist ?
-                    if (!levelDetails.live) {
-                      var mediaSource = this.mediaSource;
-                      if (mediaSource && mediaSource.readyState === 'open') {
-                        // ensure sourceBuffer are not in updating stateyes
-                        var sb = this.sourceBuffer;
-                        if (!(sb.audio && sb.audio.updating || sb.video && sb.video.updating)) {
-                          _utilsLogger.logger.log('all media data available, signal endOfStream() to MediaSource');
-                          //Notify the media element that it now has all of the media data
-                          mediaSource.endOfStream();
-                        }
-                      }
-                    }
+                    // end of VOD playlist reached
                     _frag = null;
                   }
                 }
@@ -1167,7 +1148,8 @@ var MSEMediaController = (function () {
         case State.APPENDING:
           if (this.sourceBuffer) {
             if (this.media.error) {
-              _utilsLogger.logger.error('trying to append although a media error occured, switch to ERROR state');
+              _utilsLogger.logger.error('trying to append although a media error occured');
+              hls.trigger(_events2['default'].ERROR, { type: _errors.ErrorTypes.MEDIA_ERROR, details: _errors.ErrorDetails.FRAG_APPENDING_ERROR, frag: this.fragCurrent, fatal: true });
               this.state = State.ERROR;
               return;
             }
@@ -1190,7 +1172,7 @@ var MSEMediaController = (function () {
                     } else {
                       this.appendError = 1;
                     }
-                    var event = { type: _errors.ErrorTypes.MEDIA_ERROR, details: _errors.ErrorDetails.BUFFER_APPEND_ERROR, frag: this.fragCurrent };
+                    var event = { type: _errors.ErrorTypes.MEDIA_ERROR, details: _errors.ErrorDetails.FRAG_APPENDING_ERROR, frag: this.fragCurrent };
                     /* with UHD content, we could get loop of quota exceeded error until
                       browser is able to evict some data from sourcebuffer. retrying help recovering this
                     */
@@ -1244,63 +1226,39 @@ var MSEMediaController = (function () {
       }
       // check/update current fragment
       this._checkFragmentChanged();
-      // check buffer
-      this._checkBuffer();
     }
   }, {
     key: 'bufferInfo',
     value: function bufferInfo(pos, maxHoleDuration) {
-      var media = this.media,
-          vbuffered = media.buffered,
+      var v = this.media,
+          vbuffered = v.buffered,
+          bufferLen,
+
+      // bufferStart and bufferEnd are buffer boundaries around current video position
+      bufferStart,
+          bufferEnd,
+          bufferStartNext,
+          i,
           buffered = [],
-          i;
+          buffered2 = [];
+
       for (i = 0; i < vbuffered.length; i++) {
         buffered.push({ start: vbuffered.start(i), end: vbuffered.end(i) });
       }
-      return this.bufferedInfo(buffered, pos, maxHoleDuration);
-    }
-  }, {
-    key: 'bufferedInfo',
-    value: function bufferedInfo(buffered, pos, maxHoleDuration) {
-      var buffered2 = [],
 
-      // bufferStart and bufferEnd are buffer boundaries around current video position
-      bufferLen,
-          bufferStart,
-          bufferEnd,
-          bufferStartNext,
-          i;
-      // sort on buffer.start/smaller end (IE does not always return sorted buffered range)
+      // sort on buffer.start (IE does not always return sorted buffered range)
       buffered.sort(function (a, b) {
-        var diff = a.start - b.start;
-        if (diff) {
-          return diff;
-        } else {
-          return b.end - a.end;
-        }
+        return a.start - b.start;
       });
+
       // there might be some small holes between buffer time range
       // consider that holes smaller than maxHoleDuration are irrelevant and build another
       // buffer time range representations that discards those holes
       for (i = 0; i < buffered.length; i++) {
-        var buf2len = buffered2.length;
-        if (buf2len) {
-          var buf2end = buffered2[buf2len - 1].end;
-          // if small hole (value between 0 or maxHoleDuration ) or overlapping (negative)
-          if (buffered[i].start - buf2end < maxHoleDuration) {
-            // merge overlapping time ranges
-            // update lastRange.end only if smaller than item.end
-            // e.g.  [ 1, 15] with  [ 2,8] => [ 1,15] (no need to modify lastRange.end)
-            // whereas [ 1, 8] with  [ 2,15] => [ 1,15] ( lastRange should switch from [1,8] to [1,15])
-            if (buffered[i].end > buf2end) {
-              buffered2[buf2len - 1].end = buffered[i].end;
-            }
-          } else {
-            // big hole
-            buffered2.push(buffered[i]);
-          }
+        //logger.log('buf start/end:' + buffered.start(i) + '/' + buffered.end(i));
+        if (buffered2.length && buffered[i].start - buffered2[buffered2.length - 1].end < maxHoleDuration) {
+          buffered2[buffered2.length - 1].end = buffered[i].end;
         } else {
-          // first value
           buffered2.push(buffered[i]);
         }
       }
@@ -1311,7 +1269,7 @@ var MSEMediaController = (function () {
         if (pos + maxHoleDuration >= start && pos < end) {
           // play position is inside this buffer TimeRange, retrieve end of buffer position and buffer length
           bufferStart = start;
-          bufferEnd = end + maxHoleDuration;
+          bufferEnd = end;
           bufferLen = bufferEnd - pos;
         } else if (pos + maxHoleDuration < start) {
           bufferStartNext = start;
@@ -1570,7 +1528,8 @@ var MSEMediaController = (function () {
       ms.addEventListener('sourceclose', this.onmsc);
       // link video and media Source
       media.src = URL.createObjectURL(ms);
-      this.lastReadyState = 0;
+      // FIXME: this was in code before but onverror was never set! can be removed or fixed?
+      //media.addEventListener('error', this.onverror);
     }
   }, {
     key: 'onMediaDetaching',
@@ -1806,14 +1765,6 @@ var MSEMediaController = (function () {
           audioCodec = 'mp4a.40.5';
         }
         if (!this.sourceBuffer) {
-          if (audioCodec && this.audioCodecSwap) {
-            _utilsLogger.logger.log('swapping audio codec');
-            if (audioCodec.indexOf('mp4a.40.5') !== -1) {
-              audioCodec = 'mp4a.40.2';
-            } else {
-              audioCodec = 'mp4a.40.5';
-            }
-          }
           this.sourceBuffer = {};
           _utilsLogger.logger.log('selected A/V codecs for sourceBuffers:' + audioCodec + ',' + videoCodec);
           // create source Buffer and link them to MediaSource
@@ -1883,7 +1834,7 @@ var MSEMediaController = (function () {
         case _errors.ErrorDetails.KEY_LOAD_ERROR:
         case _errors.ErrorDetails.KEY_LOAD_TIMEOUT:
           // if fatal error, stop processing, otherwise move to IDLE to retry loading
-          _utilsLogger.logger.warn('mediaController: ' + data.details + ' while loading frag,switch to ' + (data.fatal ? 'ERROR' : 'IDLE') + ' state ...');
+          _utilsLogger.logger.warn('buffer controller: ' + data.details + ' while loading frag,switch to ' + (data.fatal ? 'ERROR' : 'IDLE') + ' state ...');
           this.state = data.fatal ? State.ERROR : State.IDLE;
           break;
         default:
@@ -1903,37 +1854,29 @@ var MSEMediaController = (function () {
           this.fragLastKbps = Math.round(8 * stats.length / (stats.tbuffered - stats.tfirst));
           this.hls.trigger(_events2['default'].FRAG_BUFFERED, { stats: stats, frag: frag });
           _utilsLogger.logger.log('media buffered : ' + this.timeRangesToString(this.media.buffered));
+
+          // if stream is VOD (not live) and we reach End of Stream
+          var levelDetails = this.levels[this.level].details;
+          if (levelDetails && !levelDetails.live) {
+            // have we buffered last fragment ?
+            if (frag.sn === levelDetails.endSN) {
+              var mediaSource = this.mediaSource;
+              if (mediaSource && mediaSource.readyState === 'open') {
+                _utilsLogger.logger.log('all media data available, signal endOfStream() to MediaSource');
+                //Notify the media element that it now has all of the media data
+                mediaSource.endOfStream();
+              }
+            }
+          }
           this.state = State.IDLE;
         }
-      }
-      this.tick();
-    }
-  }, {
-    key: '_checkBuffer',
-    value: function _checkBuffer() {
-      var media = this.media;
-      if (media) {
-        // compare readyState
-        var readyState = media.readyState;
-        this.lastReadyState = readyState;
-        //logger.log(`readyState:${readyState}`);
-        // if ready state different from HAVE_NOTHING (numeric value 0), we are allowed to seek
-        if (readyState) {
-          // if seek after buffered defined, let's seek if within acceptable range
-          var seekAfterBuffered = this.seekAfterBuffered;
-          if (seekAfterBuffered) {
-            if (media.duration >= seekAfterBuffered) {
-              media.currentTime = seekAfterBuffered;
-              this.seekAfterBuffered = undefined;
-            }
-          } else if (readyState < 3) {
-            // readyState = 1 or 2
-            //  HAVE_METADATA (numeric value 1)     Enough of the resource has been obtained that the duration of the resource is available.
-            //                                       The API will no longer throw an exception when seeking.
-            // HAVE_CURRENT_DATA (numeric value 2)  Data for the immediate current playback position is available,
-            //                                      but either not enough data is available that the user agent could
-            //                                      successfully advance the current playback position
-            var currentTime = media.currentTime;
+        var video = this.media;
+        if (video) {
+          // seek back to a expected position after video buffered if needed
+          if (this.seekAfterBuffered) {
+            video.currentTime = this.seekAfterBuffered;
+          } else {
+            var currentTime = video.currentTime;
             var bufferInfo = this.bufferInfo(currentTime, 0);
             // check if current time is buffered or not
             if (bufferInfo.len === 0) {
@@ -1943,31 +1886,22 @@ var MSEMediaController = (function () {
                 // next buffer is close ! adjust currentTime to nextBufferStart
                 // this will ensure effective video decoding
                 _utilsLogger.logger.log('adjust currentTime from ' + currentTime + ' to ' + nextBufferStart);
-                media.currentTime = nextBufferStart;
+                video.currentTime = nextBufferStart;
               }
             }
           }
         }
+        // reset this variable, whether it was set or not
+        this.seekAfterBuffered = undefined;
       }
-    }
-  }, {
-    key: 'recoverMediaError',
-    value: function recoverMediaError() {
-      // if player tries to recover a MediaError with last MediaElement.readyState being HAVE_NOTHING(0) or HAVE_METADATA(1)
-      // it means that we try to recover a media error, although no media has ever been played
-      // this usually happens when there is a mismatch between Init Segment and appended buffers
-      // this is the case when there is an audio codec mismatch
-      // try to swap audio codec, this could help recovering the playback in that specific case
-      if (this.lastReadyState < 2) {
-        this.audioCodecSwap = !this.audioCodecSwap;
-      }
+      this.tick();
     }
   }, {
     key: 'onSBUpdateError',
     value: function onSBUpdateError(event) {
       _utilsLogger.logger.error('sourceBuffer error:' + event);
       this.state = State.ERROR;
-      this.hls.trigger(_events2['default'].ERROR, { type: _errors.ErrorTypes.MEDIA_ERROR, details: _errors.ErrorDetails.BUFFER_APPENDING_ERROR, fatal: true, frag: this.fragCurrent });
+      this.hls.trigger(_events2['default'].ERROR, { type: _errors.ErrorTypes.MEDIA_ERROR, details: _errors.ErrorDetails.FRAG_APPENDING_ERROR, fatal: true, frag: this.fragCurrent });
     }
   }, {
     key: 'timeRangesToString',
@@ -2048,775 +1982,7 @@ var MSEMediaController = (function () {
 exports['default'] = MSEMediaController;
 module.exports = exports['default'];
 
-},{"../demux/demuxer":12,"../errors":16,"../events":17,"../helper/level-helper":18,"../utils/binary-search":25,"../utils/logger":26}],6:[function(require,module,exports){
-/*
- *
- * This file contains an adaptation of the AES decryption algorithm
- * from the Standford Javascript Cryptography Library. That work is
- * covered by the following copyright and permissions notice:
- *
- * Copyright 2009-2010 Emily Stark, Mike Hamburg, Dan Boneh.
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
- *
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above
- *    copyright notice, this list of conditions and the following
- *    disclaimer in the documentation and/or other materials provided
- *    with the distribution.
- *
- * THIS SOFTWARE IS PROVIDED BY THE AUTHORS ``AS IS'' AND ANY EXPRESS OR
- * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
- * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED. IN NO EVENT SHALL <COPYRIGHT HOLDER> OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR
- * BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
- * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE
- * OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN
- * IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- * The views and conclusions contained in the software and documentation
- * are those of the authors and should not be interpreted as representing
- * official policies, either expressed or implied, of the authors.
- */
-'use strict';
-
-Object.defineProperty(exports, '__esModule', {
-  value: true
-});
-
-var _createClass = (function () { function defineProperties(target, props) { for (var i = 0; i < props.length; i++) { var descriptor = props[i]; descriptor.enumerable = descriptor.enumerable || false; descriptor.configurable = true; if ('value' in descriptor) descriptor.writable = true; Object.defineProperty(target, descriptor.key, descriptor); } } return function (Constructor, protoProps, staticProps) { if (protoProps) defineProperties(Constructor.prototype, protoProps); if (staticProps) defineProperties(Constructor, staticProps); return Constructor; }; })();
-
-function _classCallCheck(instance, Constructor) { if (!(instance instanceof Constructor)) { throw new TypeError('Cannot call a class as a function'); } }
-
-var AES = (function () {
-
-  /**
-   * Schedule out an AES key for both encryption and decryption. This
-   * is a low-level class. Use a cipher mode to do bulk encryption.
-   *
-   * @constructor
-   * @param key {Array} The key as an array of 4, 6 or 8 words.
-   */
-
-  function AES(key) {
-    _classCallCheck(this, AES);
-
-    /**
-     * The expanded S-box and inverse S-box tables. These will be computed
-     * on the client so that we don't have to send them down the wire.
-     *
-     * There are two tables, _tables[0] is for encryption and
-     * _tables[1] is for decryption.
-     *
-     * The first 4 sub-tables are the expanded S-box with MixColumns. The
-     * last (_tables[01][4]) is the S-box itself.
-     *
-     * @private
-     */
-    this._tables = [[[], [], [], [], []], [[], [], [], [], []]];
-
-    this._precompute();
-
-    var i,
-        j,
-        tmp,
-        encKey,
-        decKey,
-        sbox = this._tables[0][4],
-        decTable = this._tables[1],
-        keyLen = key.length,
-        rcon = 1;
-
-    if (keyLen !== 4 && keyLen !== 6 && keyLen !== 8) {
-      throw new Error('Invalid aes key size=' + keyLen);
-    }
-
-    encKey = key.slice(0);
-    decKey = [];
-    this._key = [encKey, decKey];
-
-    // schedule encryption keys
-    for (i = keyLen; i < 4 * keyLen + 28; i++) {
-      tmp = encKey[i - 1];
-
-      // apply sbox
-      if (i % keyLen === 0 || keyLen === 8 && i % keyLen === 4) {
-        tmp = sbox[tmp >>> 24] << 24 ^ sbox[tmp >> 16 & 255] << 16 ^ sbox[tmp >> 8 & 255] << 8 ^ sbox[tmp & 255];
-
-        // shift rows and add rcon
-        if (i % keyLen === 0) {
-          tmp = tmp << 8 ^ tmp >>> 24 ^ rcon << 24;
-          rcon = rcon << 1 ^ (rcon >> 7) * 283;
-        }
-      }
-
-      encKey[i] = encKey[i - keyLen] ^ tmp;
-    }
-
-    // schedule decryption keys
-    for (j = 0; i; j++, i--) {
-      tmp = encKey[j & 3 ? i : i - 4];
-      if (i <= 4 || j < 4) {
-        decKey[j] = tmp;
-      } else {
-        decKey[j] = decTable[0][sbox[tmp >>> 24]] ^ decTable[1][sbox[tmp >> 16 & 255]] ^ decTable[2][sbox[tmp >> 8 & 255]] ^ decTable[3][sbox[tmp & 255]];
-      }
-    }
-  }
-
-  /**
-   * Expand the S-box tables.
-   *
-   * @private
-   */
-
-  _createClass(AES, [{
-    key: '_precompute',
-    value: function _precompute() {
-      var encTable = this._tables[0],
-          decTable = this._tables[1],
-          sbox = encTable[4],
-          sboxInv = decTable[4],
-          i,
-          x,
-          xInv,
-          d = [],
-          th = [],
-          x2,
-          x4,
-          x8,
-          s,
-          tEnc,
-          tDec;
-
-      // Compute double and third tables
-      for (i = 0; i < 256; i++) {
-        th[(d[i] = i << 1 ^ (i >> 7) * 283) ^ i] = i;
-      }
-
-      for (x = xInv = 0; !sbox[x]; x ^= x2 || 1, xInv = th[xInv] || 1) {
-        // Compute sbox
-        s = xInv ^ xInv << 1 ^ xInv << 2 ^ xInv << 3 ^ xInv << 4;
-        s = s >> 8 ^ s & 255 ^ 99;
-        sbox[x] = s;
-        sboxInv[s] = x;
-
-        // Compute MixColumns
-        x8 = d[x4 = d[x2 = d[x]]];
-        tDec = x8 * 0x1010101 ^ x4 * 0x10001 ^ x2 * 0x101 ^ x * 0x1010100;
-        tEnc = d[s] * 0x101 ^ s * 0x1010100;
-
-        for (i = 0; i < 4; i++) {
-          encTable[i][x] = tEnc = tEnc << 24 ^ tEnc >>> 8;
-          decTable[i][s] = tDec = tDec << 24 ^ tDec >>> 8;
-        }
-      }
-
-      // Compactify. Considerable speedup on Firefox.
-      for (i = 0; i < 5; i++) {
-        encTable[i] = encTable[i].slice(0);
-        decTable[i] = decTable[i].slice(0);
-      }
-    }
-
-    /**
-     * Decrypt 16 bytes, specified as four 32-bit words.
-     * @param encrypted0 {number} the first word to decrypt
-     * @param encrypted1 {number} the second word to decrypt
-     * @param encrypted2 {number} the third word to decrypt
-     * @param encrypted3 {number} the fourth word to decrypt
-     * @param out {Int32Array} the array to write the decrypted words
-     * into
-     * @param offset {number} the offset into the output array to start
-     * writing results
-     * @return {Array} The plaintext.
-     */
-  }, {
-    key: 'decrypt',
-    value: function decrypt(encrypted0, encrypted1, encrypted2, encrypted3, out, offset) {
-      var key = this._key[1],
-
-      // state variables a,b,c,d are loaded with pre-whitened data
-      a = encrypted0 ^ key[0],
-          b = encrypted3 ^ key[1],
-          c = encrypted2 ^ key[2],
-          d = encrypted1 ^ key[3],
-          a2,
-          b2,
-          c2,
-          nInnerRounds = key.length / 4 - 2,
-          // key.length === 2 ?
-      i,
-          kIndex = 4,
-          table = this._tables[1],
-
-      // load up the tables
-      table0 = table[0],
-          table1 = table[1],
-          table2 = table[2],
-          table3 = table[3],
-          sbox = table[4];
-
-      // Inner rounds. Cribbed from OpenSSL.
-      for (i = 0; i < nInnerRounds; i++) {
-        a2 = table0[a >>> 24] ^ table1[b >> 16 & 255] ^ table2[c >> 8 & 255] ^ table3[d & 255] ^ key[kIndex];
-        b2 = table0[b >>> 24] ^ table1[c >> 16 & 255] ^ table2[d >> 8 & 255] ^ table3[a & 255] ^ key[kIndex + 1];
-        c2 = table0[c >>> 24] ^ table1[d >> 16 & 255] ^ table2[a >> 8 & 255] ^ table3[b & 255] ^ key[kIndex + 2];
-        d = table0[d >>> 24] ^ table1[a >> 16 & 255] ^ table2[b >> 8 & 255] ^ table3[c & 255] ^ key[kIndex + 3];
-        kIndex += 4;
-        a = a2;b = b2;c = c2;
-      }
-
-      // Last round.
-      for (i = 0; i < 4; i++) {
-        out[(3 & -i) + offset] = sbox[a >>> 24] << 24 ^ sbox[b >> 16 & 255] << 16 ^ sbox[c >> 8 & 255] << 8 ^ sbox[d & 255] ^ key[kIndex++];
-        a2 = a;a = b;b = c;c = d;d = a2;
-      }
-    }
-  }]);
-
-  return AES;
-})();
-
-exports['default'] = AES;
-module.exports = exports['default'];
-
-},{}],7:[function(require,module,exports){
-/*
- *
- * This file contains an adaptation of the AES decryption algorithm
- * from the Standford Javascript Cryptography Library. That work is
- * covered by the following copyright and permissions notice:
- *
- * Copyright 2009-2010 Emily Stark, Mike Hamburg, Dan Boneh.
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
- *
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above
- *    copyright notice, this list of conditions and the following
- *    disclaimer in the documentation and/or other materials provided
- *    with the distribution.
- *
- * THIS SOFTWARE IS PROVIDED BY THE AUTHORS ``AS IS'' AND ANY EXPRESS OR
- * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
- * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED. IN NO EVENT SHALL <COPYRIGHT HOLDER> OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR
- * BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
- * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE
- * OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN
- * IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- * The views and conclusions contained in the software and documentation
- * are those of the authors and should not be interpreted as representing
- * official policies, either expressed or implied, of the authors.
- */
-
-'use strict';
-
-Object.defineProperty(exports, '__esModule', {
-  value: true
-});
-
-var _createClass = (function () { function defineProperties(target, props) { for (var i = 0; i < props.length; i++) { var descriptor = props[i]; descriptor.enumerable = descriptor.enumerable || false; descriptor.configurable = true; if ('value' in descriptor) descriptor.writable = true; Object.defineProperty(target, descriptor.key, descriptor); } } return function (Constructor, protoProps, staticProps) { if (protoProps) defineProperties(Constructor.prototype, protoProps); if (staticProps) defineProperties(Constructor, staticProps); return Constructor; }; })();
-
-function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { 'default': obj }; }
-
-function _classCallCheck(instance, Constructor) { if (!(instance instanceof Constructor)) { throw new TypeError('Cannot call a class as a function'); } }
-
-var _aes = require('./aes');
-
-var _aes2 = _interopRequireDefault(_aes);
-
-var AES128Decrypter = (function () {
-  function AES128Decrypter(key, initVector) {
-    _classCallCheck(this, AES128Decrypter);
-
-    this.key = key;
-    this.iv = initVector;
-  }
-
-  /**
-   * Convert network-order (big-endian) bytes into their little-endian
-   * representation.
-   */
-
-  _createClass(AES128Decrypter, [{
-    key: 'ntoh',
-    value: function ntoh(word) {
-      return word << 24 | (word & 0xff00) << 8 | (word & 0xff0000) >> 8 | word >>> 24;
-    }
-
-    /**
-     * Decrypt bytes using AES-128 with CBC and PKCS#7 padding.
-     * @param encrypted {Uint8Array} the encrypted bytes
-     * @param key {Uint32Array} the bytes of the decryption key
-     * @param initVector {Uint32Array} the initialization vector (IV) to
-     * use for the first round of CBC.
-     * @return {Uint8Array} the decrypted bytes
-     *
-     * @see http://en.wikipedia.org/wiki/Advanced_Encryption_Standard
-     * @see http://en.wikipedia.org/wiki/Block_cipher_mode_of_operation#Cipher_Block_Chaining_.28CBC.29
-     * @see https://tools.ietf.org/html/rfc2315
-     */
-  }, {
-    key: 'doDecrypt',
-    value: function doDecrypt(encrypted, key, initVector) {
-      var
-      // word-level access to the encrypted bytes
-      encrypted32 = new Int32Array(encrypted.buffer, encrypted.byteOffset, encrypted.byteLength >> 2),
-          decipher = new _aes2['default'](Array.prototype.slice.call(key)),
-
-      // byte and word-level access for the decrypted output
-      decrypted = new Uint8Array(encrypted.byteLength),
-          decrypted32 = new Int32Array(decrypted.buffer),
-
-      // temporary variables for working with the IV, encrypted, and
-      // decrypted data
-      init0,
-          init1,
-          init2,
-          init3,
-          encrypted0,
-          encrypted1,
-          encrypted2,
-          encrypted3,
-
-      // iteration variable
-      wordIx;
-
-      // pull out the words of the IV to ensure we don't modify the
-      // passed-in reference and easier access
-      init0 = ~ ~initVector[0];
-      init1 = ~ ~initVector[1];
-      init2 = ~ ~initVector[2];
-      init3 = ~ ~initVector[3];
-
-      // decrypt four word sequences, applying cipher-block chaining (CBC)
-      // to each decrypted block
-      for (wordIx = 0; wordIx < encrypted32.length; wordIx += 4) {
-        // convert big-endian (network order) words into little-endian
-        // (javascript order)
-        encrypted0 = ~ ~this.ntoh(encrypted32[wordIx]);
-        encrypted1 = ~ ~this.ntoh(encrypted32[wordIx + 1]);
-        encrypted2 = ~ ~this.ntoh(encrypted32[wordIx + 2]);
-        encrypted3 = ~ ~this.ntoh(encrypted32[wordIx + 3]);
-
-        // decrypt the block
-        decipher.decrypt(encrypted0, encrypted1, encrypted2, encrypted3, decrypted32, wordIx);
-
-        // XOR with the IV, and restore network byte-order to obtain the
-        // plaintext
-        decrypted32[wordIx] = this.ntoh(decrypted32[wordIx] ^ init0);
-        decrypted32[wordIx + 1] = this.ntoh(decrypted32[wordIx + 1] ^ init1);
-        decrypted32[wordIx + 2] = this.ntoh(decrypted32[wordIx + 2] ^ init2);
-        decrypted32[wordIx + 3] = this.ntoh(decrypted32[wordIx + 3] ^ init3);
-
-        // setup the IV for the next round
-        init0 = encrypted0;
-        init1 = encrypted1;
-        init2 = encrypted2;
-        init3 = encrypted3;
-      }
-
-      return decrypted;
-    }
-  }, {
-    key: 'localDecript',
-    value: function localDecript(encrypted, key, initVector, decrypted) {
-      var bytes = this.doDecrypt(encrypted, key, initVector);
-      decrypted.set(bytes, encrypted.byteOffset);
-    }
-  }, {
-    key: 'decrypt',
-    value: function decrypt(encrypted) {
-      var step = 4 * 8000,
-
-      //encrypted32 = new Int32Array(encrypted.buffer),
-      encrypted32 = new Int32Array(encrypted),
-          decrypted = new Uint8Array(encrypted.byteLength),
-          i = 0;
-
-      // split up the encryption job and do the individual chunks asynchronously
-      var key = this.key;
-      var initVector = this.iv;
-      this.localDecript(encrypted32.subarray(i, i + step), key, initVector, decrypted);
-
-      for (i = step; i < encrypted32.length; i += step) {
-        initVector = new Uint32Array([this.ntoh(encrypted32[i - 4]), this.ntoh(encrypted32[i - 3]), this.ntoh(encrypted32[i - 2]), this.ntoh(encrypted32[i - 1])]);
-        this.localDecript(encrypted32.subarray(i, i + step), key, initVector, decrypted);
-      }
-
-      return decrypted;
-    }
-  }]);
-
-  return AES128Decrypter;
-})();
-
-exports['default'] = AES128Decrypter;
-module.exports = exports['default'];
-
-},{"./aes":6}],8:[function(require,module,exports){
-/*
- * AES128 decryption.
- */
-
-'use strict';
-
-Object.defineProperty(exports, '__esModule', {
-  value: true
-});
-
-var _createClass = (function () { function defineProperties(target, props) { for (var i = 0; i < props.length; i++) { var descriptor = props[i]; descriptor.enumerable = descriptor.enumerable || false; descriptor.configurable = true; if ('value' in descriptor) descriptor.writable = true; Object.defineProperty(target, descriptor.key, descriptor); } } return function (Constructor, protoProps, staticProps) { if (protoProps) defineProperties(Constructor.prototype, protoProps); if (staticProps) defineProperties(Constructor, staticProps); return Constructor; }; })();
-
-function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { 'default': obj }; }
-
-function _classCallCheck(instance, Constructor) { if (!(instance instanceof Constructor)) { throw new TypeError('Cannot call a class as a function'); } }
-
-var _aes128Decrypter = require('./aes128-decrypter');
-
-var _aes128Decrypter2 = _interopRequireDefault(_aes128Decrypter);
-
-var _errors = require('../errors');
-
-var _utilsLogger = require('../utils/logger');
-
-var Decrypter = (function () {
-  function Decrypter(hls) {
-    _classCallCheck(this, Decrypter);
-
-    this.hls = hls;
-    try {
-      var browserCrypto = window ? window.crypto : crypto;
-      this.subtle = browserCrypto.subtle || browserCrypto.webkitSubtle;
-      this.disableWebCrypto = !this.subtle;
-    } catch (e) {
-      this.disableWebCrypto = true;
-    }
-  }
-
-  _createClass(Decrypter, [{
-    key: 'destroy',
-    value: function destroy() {}
-  }, {
-    key: 'decrypt',
-    value: function decrypt(data, key, iv, callback) {
-      if (this.disableWebCrypto && this.hls.config.enableSoftwareAES) {
-        this.decryptBySoftware(data, key, iv, callback);
-      } else {
-        this.decryptByWebCrypto(data, key, iv, callback);
-      }
-    }
-  }, {
-    key: 'decryptByWebCrypto',
-    value: function decryptByWebCrypto(data, key, iv, callback) {
-      var _this = this;
-
-      _utilsLogger.logger.log('decrypting by WebCrypto API');
-
-      this.subtle.importKey('raw', key, { name: 'AES-CBC', length: 128 }, false, ['decrypt']).then(function (importedKey) {
-        _this.subtle.decrypt({ name: 'AES-CBC', iv: iv.buffer }, importedKey, data).then(callback)['catch'](function (err) {
-          _this.onWebCryptoError(err, data, key, iv, callback);
-        });
-      })['catch'](function (err) {
-        _this.onWebCryptoError(err, data, key, iv, callback);
-      });
-    }
-  }, {
-    key: 'decryptBySoftware',
-    value: function decryptBySoftware(data, key8, iv8, callback) {
-      _utilsLogger.logger.log('decrypting by JavaScript Implementation');
-
-      var view = new DataView(key8.buffer);
-      var key = new Uint32Array([view.getUint32(0), view.getUint32(4), view.getUint32(8), view.getUint32(12)]);
-
-      view = new DataView(iv8.buffer);
-      var iv = new Uint32Array([view.getUint32(0), view.getUint32(4), view.getUint32(8), view.getUint32(12)]);
-
-      var decrypter = new _aes128Decrypter2['default'](key, iv);
-      callback(decrypter.decrypt(data).buffer);
-    }
-  }, {
-    key: 'onWebCryptoError',
-    value: function onWebCryptoError(err, data, key, iv, callback) {
-      if (this.hls.config.enableSoftwareAES) {
-        _utilsLogger.logger.log('disabling to use WebCrypto API');
-        this.disableWebCrypto = true;
-        this.decryptBySoftware(data, key, iv, callback);
-      } else {
-        _utilsLogger.logger.error('decrypting error : ' + err.message);
-        this.hls.trigger(Event.ERROR, { type: _errors.ErrorTypes.MEDIA_ERROR, details: _errors.ErrorDetails.FRAG_DECRYPT_ERROR, fatal: true, reason: err.message });
-      }
-    }
-  }]);
-
-  return Decrypter;
-})();
-
-exports['default'] = Decrypter;
-module.exports = exports['default'];
-
-},{"../errors":16,"../utils/logger":26,"./aes128-decrypter":7}],9:[function(require,module,exports){
-/**
- * AAC demuxer
- */
-'use strict';
-
-Object.defineProperty(exports, '__esModule', {
-  value: true
-});
-
-var _createClass = (function () { function defineProperties(target, props) { for (var i = 0; i < props.length; i++) { var descriptor = props[i]; descriptor.enumerable = descriptor.enumerable || false; descriptor.configurable = true; if ('value' in descriptor) descriptor.writable = true; Object.defineProperty(target, descriptor.key, descriptor); } } return function (Constructor, protoProps, staticProps) { if (protoProps) defineProperties(Constructor.prototype, protoProps); if (staticProps) defineProperties(Constructor, staticProps); return Constructor; }; })();
-
-function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { 'default': obj }; }
-
-function _classCallCheck(instance, Constructor) { if (!(instance instanceof Constructor)) { throw new TypeError('Cannot call a class as a function'); } }
-
-var _utilsLogger = require('../utils/logger');
-
-var _demuxId3 = require('../demux/id3');
-
-var _demuxId32 = _interopRequireDefault(_demuxId3);
-
-var _errors = require('../errors');
-
-var AACDemuxer = (function () {
-  function AACDemuxer(observer, remuxerClass) {
-    _classCallCheck(this, AACDemuxer);
-
-    this.observer = observer;
-    this.remuxerClass = remuxerClass;
-    this.remuxer = new this.remuxerClass(observer);
-    this._aacTrack = { type: 'audio', id: -1, sequenceNumber: 0, samples: [], len: 0 };
-  }
-
-  _createClass(AACDemuxer, [{
-    key: 'push',
-
-    // feed incoming data to the front of the parsing pipeline
-    value: function push(data, audioCodec, videoCodec, timeOffset, cc, level, sn, duration) {
-      var id3 = new _demuxId32['default'](data),
-          adtsStartOffset,
-          len,
-          track = this._aacTrack,
-          pts = id3.timeStamp,
-          config,
-          nbSamples,
-          adtsFrameSize,
-          adtsHeaderLen,
-          stamp,
-          aacSample;
-      // look for ADTS header (0xFFFx)
-      for (adtsStartOffset = id3.length, len = data.length; adtsStartOffset < len - 1; adtsStartOffset++) {
-        if (data[adtsStartOffset] === 0xff && (data[adtsStartOffset + 1] & 0xf0) === 0xf0) {
-          break;
-        }
-      }
-
-      if (!track.audiosamplerate) {
-        config = this._ADTStoAudioConfig(data, adtsStartOffset, audioCodec);
-        track.config = config.config;
-        track.audiosamplerate = config.samplerate;
-        track.channelCount = config.channelCount;
-        track.codec = config.codec;
-        track.timescale = this.remuxer.timescale;
-        track.duration = this.remuxer.timescale * duration;
-        _utilsLogger.logger.log('parsed codec:' + track.codec + ',rate:' + config.samplerate + ',nb channel:' + config.channelCount);
-      }
-      nbSamples = 0;
-      while (adtsStartOffset + 5 < len) {
-        // retrieve frame size
-        adtsFrameSize = (data[adtsStartOffset + 3] & 0x03) << 11;
-        // byte 4
-        adtsFrameSize |= data[adtsStartOffset + 4] << 3;
-        // byte 5
-        adtsFrameSize |= (data[adtsStartOffset + 5] & 0xE0) >>> 5;
-        adtsHeaderLen = !!(data[adtsStartOffset + 1] & 0x01) ? 7 : 9;
-        adtsFrameSize -= adtsHeaderLen;
-        stamp = Math.round(90 * pts + nbSamples * 1024 * 90000 / track.audiosamplerate);
-        //stamp = pes.pts;
-        //console.log('AAC frame, offset/length/pts:' + (adtsStartOffset+7) + '/' + adtsFrameSize + '/' + stamp.toFixed(0));
-        if (adtsFrameSize > 0 && adtsStartOffset + adtsHeaderLen + adtsFrameSize <= len) {
-          aacSample = { unit: data.subarray(adtsStartOffset + adtsHeaderLen, adtsStartOffset + adtsHeaderLen + adtsFrameSize), pts: stamp, dts: stamp };
-          track.samples.push(aacSample);
-          track.len += adtsFrameSize;
-          adtsStartOffset += adtsFrameSize + adtsHeaderLen;
-          nbSamples++;
-          // look for ADTS header (0xFFFx)
-          for (; adtsStartOffset < len - 1; adtsStartOffset++) {
-            if (data[adtsStartOffset] === 0xff && (data[adtsStartOffset + 1] & 0xf0) === 0xf0) {
-              break;
-            }
-          }
-        } else {
-          break;
-        }
-      }
-      this.remuxer.remux(this._aacTrack, { samples: [] }, { samples: [] }, timeOffset);
-    }
-  }, {
-    key: '_ADTStoAudioConfig',
-    value: function _ADTStoAudioConfig(data, offset, audioCodec) {
-      var adtsObjectType,
-          // :int
-      adtsSampleingIndex,
-          // :int
-      adtsExtensionSampleingIndex,
-          // :int
-      adtsChanelConfig,
-          // :int
-      config,
-          userAgent = navigator.userAgent.toLowerCase(),
-          adtsSampleingRates = [96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350];
-      // byte 2
-      adtsObjectType = ((data[offset + 2] & 0xC0) >>> 6) + 1;
-      adtsSampleingIndex = (data[offset + 2] & 0x3C) >>> 2;
-      if (adtsSampleingIndex > adtsSampleingRates.length - 1) {
-        this.observer.trigger(Event.ERROR, { type: _errors.ErrorTypes.MEDIA_ERROR, details: _errors.ErrorDetails.FRAG_PARSING_ERROR, fatal: true, reason: 'invalid ADTS sampling index:' + adtsSampleingIndex });
-        return;
-      }
-      adtsChanelConfig = (data[offset + 2] & 0x01) << 2;
-      // byte 3
-      adtsChanelConfig |= (data[offset + 3] & 0xC0) >>> 6;
-      _utilsLogger.logger.log('manifest codec:' + audioCodec + ',ADTS data:type:' + adtsObjectType + ',sampleingIndex:' + adtsSampleingIndex + '[' + adtsSampleingRates[adtsSampleingIndex] + 'kHz],channelConfig:' + adtsChanelConfig);
-      // firefox: freq less than 24kHz = AAC SBR (HE-AAC)
-      if (userAgent.indexOf('firefox') !== -1) {
-        if (adtsSampleingIndex >= 6) {
-          adtsObjectType = 5;
-          config = new Array(4);
-          // HE-AAC uses SBR (Spectral Band Replication) , high frequencies are constructed from low frequencies
-          // there is a factor 2 between frame sample rate and output sample rate
-          // multiply frequency by 2 (see table below, equivalent to substract 3)
-          adtsExtensionSampleingIndex = adtsSampleingIndex - 3;
-        } else {
-          adtsObjectType = 2;
-          config = new Array(2);
-          adtsExtensionSampleingIndex = adtsSampleingIndex;
-        }
-        // Android : always use AAC
-      } else if (userAgent.indexOf('android') !== -1) {
-          adtsObjectType = 2;
-          config = new Array(2);
-          adtsExtensionSampleingIndex = adtsSampleingIndex;
-        } else {
-          /*  for other browsers (chrome ...)
-              always force audio type to be HE-AAC SBR, as some browsers do not support audio codec switch properly (like Chrome ...)
-          */
-          adtsObjectType = 5;
-          config = new Array(4);
-          // if (manifest codec is HE-AAC) OR (manifest codec not specified AND frequency less than 24kHz)
-          if (audioCodec && audioCodec.indexOf('mp4a.40.5') !== -1 || !audioCodec && adtsSampleingIndex >= 6) {
-            // HE-AAC uses SBR (Spectral Band Replication) , high frequencies are constructed from low frequencies
-            // there is a factor 2 between frame sample rate and output sample rate
-            // multiply frequency by 2 (see table below, equivalent to substract 3)
-            adtsExtensionSampleingIndex = adtsSampleingIndex - 3;
-          } else {
-            // if (manifest codec is AAC) AND (frequency less than 24kHz OR nb channel is 1)
-            if (audioCodec && audioCodec.indexOf('mp4a.40.2') !== -1 && (adtsSampleingIndex >= 6 || adtsChanelConfig === 1)) {
-              adtsObjectType = 2;
-              config = new Array(2);
-            }
-            adtsExtensionSampleingIndex = adtsSampleingIndex;
-          }
-        }
-      /* refer to http://wiki.multimedia.cx/index.php?title=MPEG-4_Audio#Audio_Specific_Config
-          ISO 14496-3 (AAC).pdf - Table 1.13 — Syntax of AudioSpecificConfig()
-        Audio Profile / Audio Object Type
-        0: Null
-        1: AAC Main
-        2: AAC LC (Low Complexity)
-        3: AAC SSR (Scalable Sample Rate)
-        4: AAC LTP (Long Term Prediction)
-        5: SBR (Spectral Band Replication)
-        6: AAC Scalable
-       sampling freq
-        0: 96000 Hz
-        1: 88200 Hz
-        2: 64000 Hz
-        3: 48000 Hz
-        4: 44100 Hz
-        5: 32000 Hz
-        6: 24000 Hz
-        7: 22050 Hz
-        8: 16000 Hz
-        9: 12000 Hz
-        10: 11025 Hz
-        11: 8000 Hz
-        12: 7350 Hz
-        13: Reserved
-        14: Reserved
-        15: frequency is written explictly
-        Channel Configurations
-        These are the channel configurations:
-        0: Defined in AOT Specifc Config
-        1: 1 channel: front-center
-        2: 2 channels: front-left, front-right
-      */
-      // audioObjectType = profile => profile, the MPEG-4 Audio Object Type minus 1
-      config[0] = adtsObjectType << 3;
-      // samplingFrequencyIndex
-      config[0] |= (adtsSampleingIndex & 0x0E) >> 1;
-      config[1] |= (adtsSampleingIndex & 0x01) << 7;
-      // channelConfiguration
-      config[1] |= adtsChanelConfig << 3;
-      if (adtsObjectType === 5) {
-        // adtsExtensionSampleingIndex
-        config[1] |= (adtsExtensionSampleingIndex & 0x0E) >> 1;
-        config[2] = (adtsExtensionSampleingIndex & 0x01) << 7;
-        // adtsObjectType (force to 2, chrome is checking that object type is less than 5 ???
-        //    https://chromium.googlesource.com/chromium/src.git/+/master/media/formats/mp4/aac.cc
-        config[2] |= 2 << 2;
-        config[3] = 0;
-      }
-      return { config: config, samplerate: adtsSampleingRates[adtsSampleingIndex], channelCount: adtsChanelConfig, codec: 'mp4a.40.' + adtsObjectType };
-    }
-  }, {
-    key: 'destroy',
-    value: function destroy() {}
-  }], [{
-    key: 'probe',
-    value: function probe(data) {
-      // check if data contains ID3 timestamp and ADTS sync worc
-      var id3 = new _demuxId32['default'](data),
-          adtsStartOffset,
-          len;
-      if (id3.hasTimeStamp) {
-        // look for ADTS header (0xFFFx)
-        for (adtsStartOffset = id3.length, len = data.length; adtsStartOffset < len - 1; adtsStartOffset++) {
-          if (data[adtsStartOffset] === 0xff && (data[adtsStartOffset + 1] & 0xf0) === 0xf0) {
-            //logger.log('ADTS sync word found !');
-            return true;
-          }
-        }
-      }
-      return false;
-    }
-  }]);
-
-  return AACDemuxer;
-})();
-
-exports['default'] = AACDemuxer;
-module.exports = exports['default'];
-
-},{"../demux/id3":14,"../errors":16,"../utils/logger":26}],10:[function(require,module,exports){
+},{"../demux/demuxer":8,"../errors":11,"../events":12,"../helper/level-helper":13,"../utils/binary-search":20,"../utils/logger":21}],6:[function(require,module,exports){
 /*  inline demuxer.
  *   probe fragments and instantiate appropriate demuxer depending on content type (TSDemuxer, AACDemuxer, ...)
  */
@@ -2838,10 +2004,6 @@ var _events = require('../events');
 var _events2 = _interopRequireDefault(_events);
 
 var _errors = require('../errors');
-
-var _demuxAacdemuxer = require('../demux/aacdemuxer');
-
-var _demuxAacdemuxer2 = _interopRequireDefault(_demuxAacdemuxer);
 
 var _demuxTsdemuxer = require('../demux/tsdemuxer');
 
@@ -2871,14 +2033,20 @@ var DemuxerInline = (function () {
         // probe for content type
         if (_demuxTsdemuxer2['default'].probe(data)) {
           demuxer = this.demuxer = new _demuxTsdemuxer2['default'](this.hls, this.remuxer);
-        } else if (_demuxAacdemuxer2['default'].probe(data)) {
-          demuxer = this.demuxer = new _demuxAacdemuxer2['default'](this.hls, this.remuxer);
         } else {
           this.hls.trigger(_events2['default'].ERROR, { type: _errors.ErrorTypes.MEDIA_ERROR, details: _errors.ErrorDetails.FRAG_PARSING_ERROR, fatal: true, reason: 'no demux matching with content found' });
           return;
         }
       }
       demuxer.push(data, audioCodec, videoCodec, timeOffset, cc, level, sn, duration);
+    }
+  }, {
+    key: 'remux',
+    value: function remux() {
+      var demuxer = this.demuxer;
+      if (demuxer) {
+        demuxer.remux();
+      }
     }
   }]);
 
@@ -2888,7 +2056,7 @@ var DemuxerInline = (function () {
 exports['default'] = DemuxerInline;
 module.exports = exports['default'];
 
-},{"../demux/aacdemuxer":9,"../demux/tsdemuxer":15,"../errors":16,"../events":17}],11:[function(require,module,exports){
+},{"../demux/tsdemuxer":10,"../errors":11,"../events":12}],7:[function(require,module,exports){
 /* demuxer web worker.
  *  - listen to worker message, and trigger DemuxerInline upon reception of Fragments.
  *  - provides MP4 Boxes back to main thread using [transferable objects](https://developers.google.com/web/updates/2011/12/Transferable-Objects-Lightning-Fast) in order to minimize message passing overhead.
@@ -2995,7 +2163,7 @@ var DemuxerWorker = function DemuxerWorker(self) {
 exports['default'] = DemuxerWorker;
 module.exports = exports['default'];
 
-},{"../demux/demuxer-inline":10,"../events":17,"../remux/mp4-remuxer":24,"events":1}],12:[function(require,module,exports){
+},{"../demux/demuxer-inline":6,"../events":12,"../remux/mp4-remuxer":19,"events":1}],8:[function(require,module,exports){
 'use strict';
 
 Object.defineProperty(exports, '__esModule', {
@@ -3012,6 +2180,8 @@ var _events = require('../events');
 
 var _events2 = _interopRequireDefault(_events);
 
+var _errors = require('../errors');
+
 var _demuxDemuxerInline = require('../demux/demuxer-inline');
 
 var _demuxDemuxerInline2 = _interopRequireDefault(_demuxDemuxerInline);
@@ -3025,10 +2195,6 @@ var _utilsLogger = require('../utils/logger');
 var _remuxMp4Remuxer = require('../remux/mp4-remuxer');
 
 var _remuxMp4Remuxer2 = _interopRequireDefault(_remuxMp4Remuxer);
-
-var _cryptDecrypter = require('../crypt/decrypter');
-
-var _cryptDecrypter2 = _interopRequireDefault(_cryptDecrypter);
 
 var Demuxer = (function () {
   function Demuxer(hls) {
@@ -3062,11 +2228,6 @@ var Demuxer = (function () {
         this.w = null;
       } else {
         this.demuxer.destroy();
-        this.demuxer = null;
-      }
-      if (this.decrypter) {
-        this.decrypter.destroy();
-        this.decrypter = null;
       }
     }
   }, {
@@ -3083,13 +2244,17 @@ var Demuxer = (function () {
     key: 'push',
     value: function push(data, audioCodec, videoCodec, timeOffset, cc, level, sn, duration, decryptdata) {
       if (data.byteLength > 0 && decryptdata != null && decryptdata.key != null && decryptdata.method === 'AES-128') {
-        if (this.decrypter == null) {
-          this.decrypter = new _cryptDecrypter2['default'](this.hls);
-        }
-
         var localthis = this;
-        this.decrypter.decrypt(data, decryptdata.key, decryptdata.iv, function (decryptedData) {
-          localthis.pushDecrypted(decryptedData, audioCodec, videoCodec, timeOffset, cc, level, sn, duration);
+        window.crypto.subtle.importKey('raw', decryptdata.key, { name: 'AES-CBC', length: 128 }, false, ['decrypt']).then(function (importedKey) {
+          window.crypto.subtle.decrypt({ name: 'AES-CBC', iv: decryptdata.iv.buffer }, importedKey, data).then(function (result) {
+            localthis.pushDecrypted(result, audioCodec, videoCodec, timeOffset, cc, level, sn, duration);
+          })['catch'](function (err) {
+            localthis.hls.trigger(_events2['default'].ERROR, { type: _errors.ErrorTypes.MEDIA_ERROR, details: _errors.ErrorTypes.FRAG_PARSING_ERROR, fatal: true, reason: err.message });
+            return;
+          });
+        })['catch'](function (err) {
+          localthis.hls.trigger(_events2['default'].ERROR, { type: _errors.ErrorTypes.MEDIA_ERROR, details: _errors.ErrorTypes.FRAG_PARSING_ERROR, fatal: true, reason: err.message });
+          return;
         });
       } else {
         this.pushDecrypted(data, audioCodec, videoCodec, timeOffset, cc, level, sn, duration);
@@ -3145,7 +2310,7 @@ var Demuxer = (function () {
 exports['default'] = Demuxer;
 module.exports = exports['default'];
 
-},{"../crypt/decrypter":8,"../demux/demuxer-inline":10,"../demux/demuxer-worker":11,"../events":17,"../remux/mp4-remuxer":24,"../utils/logger":26,"webworkify":2}],13:[function(require,module,exports){
+},{"../demux/demuxer-inline":6,"../demux/demuxer-worker":7,"../errors":11,"../events":12,"../remux/mp4-remuxer":19,"../utils/logger":21,"webworkify":2}],9:[function(require,module,exports){
 /**
  * Parser for exponential Golomb codes, a variable-bitwidth number encoding scheme used by h264.
 */
@@ -3343,7 +2508,6 @@ var ExpGolomb = (function () {
           frameCropRightOffset = 0,
           frameCropTopOffset = 0,
           frameCropBottomOffset = 0,
-          sarScale = 1,
           profileIdc,
           profileCompat,
           levelIdc,
@@ -3412,58 +2576,12 @@ var ExpGolomb = (function () {
         frameCropTopOffset = this.readUEG();
         frameCropBottomOffset = this.readUEG();
       }
-      if (this.readBoolean()) {
-        // vui_parameters_present_flag
-        if (this.readBoolean()) {
-          // aspect_ratio_info_present_flag
-          var sarRatio = undefined;
-          var aspectRatioIdc = this.readUByte();
-          switch (aspectRatioIdc) {
-            //case 1: sarRatio = [1,1]; break;
-            case 2:
-              sarRatio = [12, 11];break;
-            case 3:
-              sarRatio = [10, 11];break;
-            case 4:
-              sarRatio = [16, 11];break;
-            case 5:
-              sarRatio = [40, 33];break;
-            case 6:
-              sarRatio = [24, 11];break;
-            case 7:
-              sarRatio = [20, 11];break;
-            case 8:
-              sarRatio = [32, 11];break;
-            case 9:
-              sarRatio = [80, 33];break;
-            case 10:
-              sarRatio = [18, 11];break;
-            case 11:
-              sarRatio = [15, 11];break;
-            case 12:
-              sarRatio = [64, 33];break;
-            case 13:
-              sarRatio = [160, 99];break;
-            case 14:
-              sarRatio = [4, 3];break;
-            case 15:
-              sarRatio = [3, 2];break;
-            case 16:
-              sarRatio = [2, 1];break;
-            case 255:
-              {
-                sarRatio = [this.readUByte() << 8 | this.readUByte(), this.readUByte() << 8 | this.readUByte()];
-                break;
-              }
-          }
-          if (sarRatio) {
-            sarScale = sarRatio[0] / sarRatio[1];
-          }
-        }
-      }
       return {
-        width: ((picWidthInMbsMinus1 + 1) * 16 - frameCropLeftOffset * 2 - frameCropRightOffset * 2) * sarScale,
-        height: (2 - frameMbsOnlyFlag) * (picHeightInMapUnitsMinus1 + 1) * 16 - (frameMbsOnlyFlag ? 2 : 4) * (frameCropTopOffset + frameCropBottomOffset)
+        profileIdc: profileIdc,
+        profileCompat: profileCompat,
+        levelIdc: levelIdc,
+        width: (picWidthInMbsMinus1 + 1) * 16 - frameCropLeftOffset * 2 - frameCropRightOffset * 2,
+        height: (2 - frameMbsOnlyFlag) * (picHeightInMapUnitsMinus1 + 1) * 16 - frameCropTopOffset * 2 - frameCropBottomOffset * 2
       };
     }
   }, {
@@ -3484,155 +2602,7 @@ var ExpGolomb = (function () {
 exports['default'] = ExpGolomb;
 module.exports = exports['default'];
 
-},{"../utils/logger":26}],14:[function(require,module,exports){
-/**
- * ID3 parser
- */
-'use strict';
-
-Object.defineProperty(exports, '__esModule', {
-    value: true
-});
-
-var _createClass = (function () { function defineProperties(target, props) { for (var i = 0; i < props.length; i++) { var descriptor = props[i]; descriptor.enumerable = descriptor.enumerable || false; descriptor.configurable = true; if ('value' in descriptor) descriptor.writable = true; Object.defineProperty(target, descriptor.key, descriptor); } } return function (Constructor, protoProps, staticProps) { if (protoProps) defineProperties(Constructor.prototype, protoProps); if (staticProps) defineProperties(Constructor, staticProps); return Constructor; }; })();
-
-function _classCallCheck(instance, Constructor) { if (!(instance instanceof Constructor)) { throw new TypeError('Cannot call a class as a function'); } }
-
-var _utilsLogger = require('../utils/logger');
-
-//import Hex from '../utils/hex';
-
-var ID3 = (function () {
-    function ID3(data) {
-        _classCallCheck(this, ID3);
-
-        this._hasTimeStamp = false;
-        var offset = 0,
-            byte1,
-            byte2,
-            byte3,
-            byte4,
-            tagSize,
-            endPos,
-            header,
-            len;
-        do {
-            header = this.readUTF(data, offset, 3);
-            offset += 3;
-            // first check for ID3 header
-            if (header === 'ID3') {
-                // skip 24 bits
-                offset += 3;
-                // retrieve tag(s) length
-                byte1 = data[offset++] & 0x7f;
-                byte2 = data[offset++] & 0x7f;
-                byte3 = data[offset++] & 0x7f;
-                byte4 = data[offset++] & 0x7f;
-                tagSize = (byte1 << 21) + (byte2 << 14) + (byte3 << 7) + byte4;
-                endPos = offset + tagSize;
-                //logger.log(`ID3 tag found, size/end: ${tagSize}/${endPos}`);
-
-                // read ID3 tags
-                this._parseID3Frames(data, offset, endPos);
-                offset = endPos;
-            } else if (header === '3DI') {
-                // http://id3.org/id3v2.4.0-structure chapter 3.4.   ID3v2 footer
-                offset += 7;
-                _utilsLogger.logger.log('3DI footer found, end: ' + offset);
-            } else {
-                offset -= 3;
-                len = offset;
-                if (len) {
-                    //logger.log(`ID3 len: ${len}`);
-                    if (!this.hasTimeStamp) {
-                        _utilsLogger.logger.warn('ID3 tag found, but no timestamp');
-                    }
-                    this._length = len;
-                }
-                return;
-            }
-        } while (true);
-    }
-
-    _createClass(ID3, [{
-        key: 'readUTF',
-        value: function readUTF(data, start, len) {
-
-            var result = '',
-                offset = start,
-                end = start + len;
-            do {
-                result += String.fromCharCode(data[offset++]);
-            } while (offset < end);
-            return result;
-        }
-    }, {
-        key: '_parseID3Frames',
-        value: function _parseID3Frames(data, offset, endPos) {
-            var tagId, tagLen, tagStart, tagFlags, timestamp;
-            while (offset + 8 <= endPos) {
-                tagId = this.readUTF(data, offset, 4);
-                offset += 4;
-
-                tagLen = data[offset++] << 24 + data[offset++] << 16 + data[offset++] << 8 + data[offset++];
-
-                tagFlags = data[offset++] << 8 + data[offset++];
-
-                tagStart = offset;
-                //logger.log("ID3 tag id:" + tagId);
-                switch (tagId) {
-                    case 'PRIV':
-                        //logger.log('parse frame:' + Hex.hexDump(data.subarray(offset,endPos)));
-                        // owner should be "com.apple.streaming.transportStreamTimestamp"
-                        if (this.readUTF(data, offset, 44) === 'com.apple.streaming.transportStreamTimestamp') {
-                            offset += 44;
-                            // smelling even better ! we found the right descriptor
-                            // skip null character (string end) + 3 first bytes
-                            offset += 4;
-
-                            // timestamp is 33 bit expressed as a big-endian eight-octet number, with the upper 31 bits set to zero.
-                            var pts33Bit = data[offset++] & 0x1;
-                            this._hasTimeStamp = true;
-
-                            timestamp = ((data[offset++] << 23) + (data[offset++] << 15) + (data[offset++] << 7) + data[offset++]) / 45;
-
-                            if (pts33Bit) {
-                                timestamp += 47721858.84; // 2^32 / 90
-                            }
-                            timestamp = Math.round(timestamp);
-                            _utilsLogger.logger.trace('ID3 timestamp found: ' + timestamp);
-                            this._timeStamp = timestamp;
-                        }
-                        break;
-                    default:
-                        break;
-                }
-            }
-        }
-    }, {
-        key: 'hasTimeStamp',
-        get: function get() {
-            return this._hasTimeStamp;
-        }
-    }, {
-        key: 'timeStamp',
-        get: function get() {
-            return this._timeStamp;
-        }
-    }, {
-        key: 'length',
-        get: function get() {
-            return this._length;
-        }
-    }]);
-
-    return ID3;
-})();
-
-exports['default'] = ID3;
-module.exports = exports['default'];
-
-},{"../utils/logger":26}],15:[function(require,module,exports){
+},{"../utils/logger":21}],10:[function(require,module,exports){
 /**
  * highly optimized TS demuxer:
  * parse PAT, PMT
@@ -4006,6 +2976,9 @@ var TSDemuxer = (function () {
               var config = expGolombDecoder.readSPS();
               track.width = config.width;
               track.height = config.height;
+              track.profileIdc = config.profileIdc;
+              track.profileCompat = config.profileCompat;
+              track.levelIdc = config.levelIdc;
               track.sps = [unit.data];
               track.timescale = _this.remuxer.timescale;
               track.duration = _this.remuxer.timescale * _this._duration;
@@ -4277,8 +3250,8 @@ var TSDemuxer = (function () {
           */
           adtsObjectType = 5;
           config = new Array(4);
-          // if (manifest codec is HE-AAC or HE-AACv2) OR (manifest codec not specified AND frequency less than 24kHz)
-          if (audioCodec && (audioCodec.indexOf('mp4a.40.29') !== -1 || audioCodec.indexOf('mp4a.40.5') !== -1) || !audioCodec && adtsSampleingIndex >= 6) {
+          // if (manifest codec is HE-AAC) OR (manifest codec not specified AND frequency less than 24kHz)
+          if (audioCodec && audioCodec.indexOf('mp4a.40.5') !== -1 || !audioCodec && adtsSampleingIndex >= 6) {
             // HE-AAC uses SBR (Spectral Band Replication) , high frequencies are constructed from low frequencies
             // there is a factor 2 between frame sample rate and output sample rate
             // multiply frequency by 2 (see table below, equivalent to substract 3)
@@ -4366,7 +3339,7 @@ var TSDemuxer = (function () {
 exports['default'] = TSDemuxer;
 module.exports = exports['default'];
 
-},{"../errors":16,"../events":17,"../utils/logger":26,"./exp-golomb":13}],16:[function(require,module,exports){
+},{"../errors":11,"../events":12,"../utils/logger":21,"./exp-golomb":9}],11:[function(require,module,exports){
 'use strict';
 
 Object.defineProperty(exports, '__esModule', {
@@ -4401,22 +3374,18 @@ var ErrorDetails = {
   FRAG_LOOP_LOADING_ERROR: 'fragLoopLoadingError',
   // Identifier for fragment load timeout error - data: { frag : fragment object}
   FRAG_LOAD_TIMEOUT: 'fragLoadTimeOut',
-  // Identifier for a fragment decryption error event - data: parsing error description
-  FRAG_DECRYPT_ERROR: 'fragDecryptError',
   // Identifier for a fragment parsing error event - data: parsing error description
   FRAG_PARSING_ERROR: 'fragParsingError',
+  // Identifier for a fragment appending error event - data: appending error description
+  FRAG_APPENDING_ERROR: 'fragAppendingError',
   // Identifier for decrypt key load error - data: { frag : fragment object, response : XHR response}
   KEY_LOAD_ERROR: 'keyLoadError',
   // Identifier for decrypt key load timeout error - data: { frag : fragment object}
-  KEY_LOAD_TIMEOUT: 'keyLoadTimeOut',
-  // Identifier for a buffer append error - data: append error description
-  BUFFER_APPEND_ERROR: 'bufferAppendError',
-  // Identifier for a buffer appending error event - data: appending error description
-  BUFFER_APPENDING_ERROR: 'bufferAppendingError'
+  KEY_LOAD_TIMEOUT: 'keyLoadTimeOut'
 };
 exports.ErrorDetails = ErrorDetails;
 
-},{}],17:[function(require,module,exports){
+},{}],12:[function(require,module,exports){
 'use strict';
 
 Object.defineProperty(exports, '__esModule', {
@@ -4471,7 +3440,7 @@ exports['default'] = {
   FPS_DROP: 'hlsFPSDrop',
   // Identifier for an error event - data: { type : error type, details : error details, fatal : if true, hls.js cannot/will not try to recover, if false, hls.js will try to recover,other error specific data}
   ERROR: 'hlsError',
-  // fired when hls.js instance starts destroying. Different from MEDIA_DETACHED as one could want to detach and reattach a media to the instance of hls.js to handle mid-rolls for example
+  // fired when hls.js instance starts destroying. Different from MSE_DETACHED as one could want to detach and reattach a media to the instance of hls.js to handle mid-rolls for example
   DESTROYING: 'hlsDestroying',
   // fired when a decrypt key loading starts - data: { frag : fragment object}
   KEY_LOADING: 'hlsKeyLoading',
@@ -4480,7 +3449,7 @@ exports['default'] = {
 };
 module.exports = exports['default'];
 
-},{}],18:[function(require,module,exports){
+},{}],13:[function(require,module,exports){
 /**
  * Level Helper class, providing methods dealing with playlist sliding and drift
 */
@@ -4626,7 +3595,7 @@ var LevelHelper = (function () {
 exports['default'] = LevelHelper;
 module.exports = exports['default'];
 
-},{"../utils/logger":26}],19:[function(require,module,exports){
+},{"../utils/logger":21}],14:[function(require,module,exports){
 /**
  * HLS interface
  */
@@ -4721,7 +3690,6 @@ var Hls = (function () {
       liveMaxLatencyDurationCount: Infinity,
       maxMaxBufferLength: 600,
       enableWorker: true,
-      enableSoftwareAES: true,
       fragLoadingTimeOut: 20000,
       fragLoadingMaxRetry: 1,
       fragLoadingRetryDelay: 1000,
@@ -4729,8 +3697,8 @@ var Hls = (function () {
       manifestLoadingTimeOut: 10000,
       manifestLoadingMaxRetry: 1,
       manifestLoadingRetryDelay: 1000,
-      // fpsDroppedMonitoringPeriod: 5000,
-      // fpsDroppedMonitoringThreshold: 0.2,
+      fpsDroppedMonitoringPeriod: 5000,
+      fpsDroppedMonitoringThreshold: 0.2,
       appendErrorMaxRetry: 200,
       loader: _utilsXhrLoader2['default'],
       fLoader: undefined,
@@ -4746,7 +3714,7 @@ var Hls = (function () {
     }
 
     if (config.liveMaxLatencyDurationCount !== undefined && config.liveMaxLatencyDurationCount <= config.liveSyncDurationCount) {
-      throw new Error('Illegal hls.js config: "liveMaxLatencyDurationCount" must be gt "liveSyncDurationCount"');
+      throw new Error('Illegal hls.js configuration: "liveMaxLatencyDurationCount" must be strictly superior to "liveSyncDurationCount" in player configuration');
     }
 
     (0, _utilsLogger.enableLogs)(config.debug);
@@ -4785,7 +3753,6 @@ var Hls = (function () {
     value: function destroy() {
       _utilsLogger.logger.log('destroy');
       this.trigger(_events2['default'].DESTROYING);
-      this.detachMedia();
       this.playlistLoader.destroy();
       this.fragmentLoader.destroy();
       this.levelController.destroy();
@@ -4793,6 +3760,7 @@ var Hls = (function () {
       this.keyLoader.destroy();
       //this.fpsController.destroy();
       this.url = null;
+      this.detachMedia();
       this.observer.removeAllListeners();
     }
   }, {
@@ -4830,7 +3798,6 @@ var Hls = (function () {
       var media = this.media;
       this.detachMedia();
       this.attachMedia(media);
-      this.mediaController.recoverMediaError();
     }
 
     /** Return all quality levels **/
@@ -4961,7 +3928,7 @@ var Hls = (function () {
 exports['default'] = Hls;
 module.exports = exports['default'];
 
-},{"./controller/abr-controller":3,"./controller/level-controller":4,"./controller/mse-media-controller":5,"./errors":16,"./events":17,"./loader/fragment-loader":20,"./loader/key-loader":21,"./loader/playlist-loader":22,"./utils/logger":26,"./utils/xhr-loader":28,"events":1}],20:[function(require,module,exports){
+},{"./controller/abr-controller":3,"./controller/level-controller":4,"./controller/mse-media-controller":5,"./errors":11,"./events":12,"./loader/fragment-loader":15,"./loader/key-loader":16,"./loader/playlist-loader":17,"./utils/logger":21,"./utils/xhr-loader":23,"events":1}],15:[function(require,module,exports){
 /*
  * Fragment Loader
 */
@@ -5047,7 +4014,7 @@ var FragmentLoader = (function () {
 exports['default'] = FragmentLoader;
 module.exports = exports['default'];
 
-},{"../errors":16,"../events":17}],21:[function(require,module,exports){
+},{"../errors":11,"../events":12}],16:[function(require,module,exports){
 /*
  * Decrypt key Loader
 */
@@ -5141,7 +4108,7 @@ var KeyLoader = (function () {
 exports['default'] = KeyLoader;
 module.exports = exports['default'];
 
-},{"../errors":16,"../events":17}],22:[function(require,module,exports){
+},{"../errors":11,"../events":12}],17:[function(require,module,exports){
 /**
  * Playlist Loader
 */
@@ -5481,12 +4448,11 @@ var PlaylistLoader = (function () {
 exports['default'] = PlaylistLoader;
 module.exports = exports['default'];
 
-},{"../errors":16,"../events":17,"../utils/url":27}],23:[function(require,module,exports){
+},{"../errors":11,"../events":12,"../utils/url":22}],18:[function(require,module,exports){
 /**
  * Generate MP4 Box
 */
 
-//import Hex from '../utils/hex';
 'use strict';
 
 Object.defineProperty(exports, '__esModule', {
@@ -5761,37 +4727,19 @@ var MP4 = (function () {
     value: function avc1(track) {
       var sps = [],
           pps = [],
-          i,
-          data,
-          len;
+          i;
       // assemble the SPSs
-
       for (i = 0; i < track.sps.length; i++) {
-        data = track.sps[i];
-        len = data.byteLength;
-        sps.push(len >>> 8 & 0xFF);
-        sps.push(len & 0xFF);
-        sps = sps.concat(Array.prototype.slice.call(data)); // SPS
+        sps.push(track.sps[i].byteLength >>> 8 & 0xFF);
+        sps.push(track.sps[i].byteLength & 0xFF); // sequenceParameterSetLength
+        sps = sps.concat(Array.prototype.slice.call(track.sps[i])); // SPS
       }
-
       // assemble the PPSs
       for (i = 0; i < track.pps.length; i++) {
-        data = track.pps[i];
-        len = data.byteLength;
-        pps.push(len >>> 8 & 0xFF);
-        pps.push(len & 0xFF);
-        pps = pps.concat(Array.prototype.slice.call(data));
+        pps.push(track.pps[i].byteLength >>> 8 & 0xFF);
+        pps.push(track.pps[i].byteLength & 0xFF);
+        pps = pps.concat(Array.prototype.slice.call(track.pps[i]));
       }
-
-      var avcc = MP4.box(MP4.types.avcC, new Uint8Array([0x01, // version
-      sps[3], // profile
-      sps[4], // profile compat
-      sps[5], // level
-      0xfc | 3, // lengthSizeMinusOne, hard-coded to 4 bytes
-      0xE0 | track.sps.length // 3bit reserved (111) + numOfSequenceParameterSets
-      ].concat(sps).concat([track.pps.length // numOfPictureParameterSets
-      ]).concat(pps))); // "PPS"
-      //console.log('avcc:' + Hex.hexDump(avcc));
       return MP4.box(MP4.types.avc1, new Uint8Array([0x00, 0x00, 0x00, // reserved
       0x00, 0x00, 0x00, // reserved
       0x00, 0x01, // data_reference_index
@@ -5807,7 +4755,15 @@ var MP4 = (function () {
       0x13, 0x76, 0x69, 0x64, 0x65, 0x6f, 0x6a, 0x73, 0x2d, 0x63, 0x6f, 0x6e, 0x74, 0x72, 0x69, 0x62, 0x2d, 0x68, 0x6c, 0x73, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // compressorname
       0x00, 0x18, // depth = 24
       0x11, 0x11]), // pre_defined = -1
-      avcc, MP4.box(MP4.types.btrt, new Uint8Array([0x00, 0x1c, 0x9c, 0x80, // bufferSizeDB
+      MP4.box(MP4.types.avcC, new Uint8Array([0x01, // configurationVersion
+      track.profileIdc, // AVCProfileIndication
+      track.profileCompat, // profile_compatibility
+      track.levelIdc, // AVCLevelIndication
+      0xff // lengthSizeMinusOne, hard-coded to 4 bytes
+      ].concat([track.sps.length // numOfSequenceParameterSets
+      ]).concat(sps).concat([track.pps.length // numOfPictureParameterSets
+      ]).concat(pps))), // "PPS"
+      MP4.box(MP4.types.btrt, new Uint8Array([0x00, 0x1c, 0x9c, 0x80, // bufferSizeDB
       0x00, 0x2d, 0xc6, 0xc0, // maxBitrate
       0x00, 0x2d, 0xc6, 0xc0])) // avgBitrate
       );
@@ -5961,7 +4917,7 @@ var MP4 = (function () {
 exports['default'] = MP4;
 module.exports = exports['default'];
 
-},{}],24:[function(require,module,exports){
+},{}],19:[function(require,module,exports){
 /**
  * fMP4 remuxer
 */
@@ -6268,7 +5224,7 @@ var MP4Remuxer = (function () {
           // we use DTS to compute sample duration, but we use PTS to compute initPTS which is used to sync audio and video
           mp4Sample.duration = (dtsnorm - lastDTS) / pes2mp4ScaleFactor;
           if (mp4Sample.duration < 0) {
-            _utilsLogger.logger.log('invalid AAC sample duration at PTS:' + aacSample.pts + ':' + mp4Sample.duration);
+            //logger.log('invalid sample duration at PTS/DTS::' + aacSample.pts + '/' + aacSample.dts + ':' + mp4Sample.duration);
             mp4Sample.duration = 0;
           }
         } else {
@@ -6282,10 +5238,11 @@ var MP4Remuxer = (function () {
             // log delta
             if (delta) {
               if (delta > 1) {
-                _utilsLogger.logger.log(delta + ' ms hole between AAC samples detected,filling it');
+                _utilsLogger.logger.log('AAC:' + delta + ' ms hole between fragments detected,filling it');
                 // set PTS to next PTS, and ensure PTS is greater or equal than last DTS
+                //logger.log('Audio/PTS/DTS adjusted:' + aacSample.pts + '/' + aacSample.dts);
               } else if (delta < -1) {
-                  _utilsLogger.logger.log(-delta + ' ms overlapping between AAC samples detected');
+                  _utilsLogger.logger.log('AAC:' + -delta + ' ms overlapping between fragments detected');
                 }
               // set DTS to next DTS
               ptsnorm = dtsnorm = nextAacPts;
@@ -6390,7 +5347,7 @@ var MP4Remuxer = (function () {
 exports['default'] = MP4Remuxer;
 module.exports = exports['default'];
 
-},{"../errors":16,"../events":17,"../remux/mp4-generator":23,"../utils/logger":26}],25:[function(require,module,exports){
+},{"../errors":11,"../events":12,"../remux/mp4-generator":18,"../utils/logger":21}],20:[function(require,module,exports){
 "use strict";
 
 var BinarySearch = {
@@ -6435,7 +5392,7 @@ var BinarySearch = {
 
 module.exports = BinarySearch;
 
-},{}],26:[function(require,module,exports){
+},{}],21:[function(require,module,exports){
 'use strict';
 
 Object.defineProperty(exports, '__esModule', {
@@ -6444,8 +5401,6 @@ Object.defineProperty(exports, '__esModule', {
 function noop() {}
 
 var fakeLogger = {
-  trace: noop,
-  debug: noop,
   log: noop,
   warn: noop,
   info: noop,
@@ -6454,59 +5409,21 @@ var fakeLogger = {
 
 var exportedLogger = fakeLogger;
 
-//let lastCallTime;
-// function formatMsgWithTimeInfo(type, msg) {
-//   const now = Date.now();
-//   const diff = lastCallTime ? '+' + (now - lastCallTime) : '0';
-//   lastCallTime = now;
-//   msg = (new Date(now)).toISOString() + ' | [' +  type + '] > ' + msg + ' ( ' + diff + ' ms )';
-//   return msg;
-// }
-
-function formatMsg(type, msg) {
-  msg = '[' + type + '] > ' + msg;
-  return msg;
-}
-
-function consolePrintFn(type) {
-  var func = window.console[type];
-  if (func) {
-    return function () {
-      for (var _len = arguments.length, args = Array(_len), _key = 0; _key < _len; _key++) {
-        args[_key] = arguments[_key];
-      }
-
-      if (args[0]) {
-        args[0] = formatMsg(type, args[0]);
-      }
-      func.apply(window.console, args);
-    };
-  }
-  return noop;
-}
-
-function exportLoggerFunctions(debugConfig) {
-  for (var _len2 = arguments.length, functions = Array(_len2 > 1 ? _len2 - 1 : 0), _key2 = 1; _key2 < _len2; _key2++) {
-    functions[_key2 - 1] = arguments[_key2];
-  }
-
-  functions.forEach(function (type) {
-    exportedLogger[type] = debugConfig[type] ? debugConfig[type].bind(debugConfig) : consolePrintFn(type);
-  });
-}
-
-var enableLogs = function enableLogs(debugConfig) {
-  if (debugConfig === true || typeof debugConfig === 'object') {
-    exportLoggerFunctions(debugConfig,
-    // Remove out from list here to hard-disable a log-level
-    //'trace',
-    'debug', 'log', 'info', 'warn', 'error');
+var enableLogs = function enableLogs(debug) {
+  if (debug === true || typeof debug === 'object') {
+    exportedLogger.log = debug.log ? debug.log.bind(debug) : console.log.bind(console);
+    exportedLogger.info = debug.info ? debug.info.bind(debug) : console.info.bind(console);
+    exportedLogger.error = debug.error ? debug.error.bind(debug) : console.error.bind(console);
+    exportedLogger.warn = debug.warn ? debug.warn.bind(debug) : console.warn.bind(console);
     // Some browsers don't allow to use bind on console object anyway
     // fallback to default if needed
     try {
       exportedLogger.log();
     } catch (e) {
-      exportedLogger = fakeLogger;
+      exportedLogger.log = noop;
+      exportedLogger.info = noop;
+      exportedLogger.error = noop;
+      exportedLogger.warn = noop;
     }
   } else {
     exportedLogger = fakeLogger;
@@ -6517,7 +5434,7 @@ exports.enableLogs = enableLogs;
 var logger = exportedLogger;
 exports.logger = logger;
 
-},{}],27:[function(require,module,exports){
+},{}],22:[function(require,module,exports){
 'use strict';
 
 var URLHelper = {
@@ -6598,7 +5515,7 @@ var URLHelper = {
 
 module.exports = URLHelper;
 
-},{}],28:[function(require,module,exports){
+},{}],23:[function(require,module,exports){
 /**
  * XHR based logger
 */
@@ -6678,7 +5595,7 @@ var XhrLoader = (function () {
       this.stats.tfirst = null;
       this.stats.loaded = 0;
       if (this.xhrSetup) {
-        this.xhrSetup(xhr, this.url);
+        this.xhrSetup(xhr);
       }
       xhr.send();
     }
@@ -6731,6 +5648,6 @@ var XhrLoader = (function () {
 exports['default'] = XhrLoader;
 module.exports = exports['default'];
 
-},{"../utils/logger":26}]},{},[19])(19)
+},{"../utils/logger":21}]},{},[14])(14)
 });
 //# sourceMappingURL=hls.js.map
