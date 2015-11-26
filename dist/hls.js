@@ -1148,8 +1148,7 @@ var MSEMediaController = (function () {
         case State.APPENDING:
           if (this.sourceBuffer) {
             if (this.media.error) {
-              _utilsLogger.logger.error('trying to append although a media error occured');
-              hls.trigger(_events2['default'].ERROR, { type: _errors.ErrorTypes.MEDIA_ERROR, details: _errors.ErrorDetails.FRAG_APPENDING_ERROR, frag: this.fragCurrent, fatal: true });
+              _utilsLogger.logger.error('trying to append although a media error occured, switch to ERROR state');
               this.state = State.ERROR;
               return;
             }
@@ -2249,11 +2248,13 @@ var Demuxer = (function () {
           window.crypto.subtle.decrypt({ name: 'AES-CBC', iv: decryptdata.iv.buffer }, importedKey, data).then(function (result) {
             localthis.pushDecrypted(result, audioCodec, videoCodec, timeOffset, cc, level, sn, duration);
           })['catch'](function (err) {
-            localthis.hls.trigger(_events2['default'].ERROR, { type: _errors.ErrorTypes.MEDIA_ERROR, details: _errors.ErrorTypes.FRAG_PARSING_ERROR, fatal: true, reason: err.message });
+            _utilsLogger.logger.error('decrypting error : ' + err.message);
+            localthis.hls.trigger(_events2['default'].ERROR, { type: _errors.ErrorTypes.MEDIA_ERROR, details: _errors.ErrorDetails.FRAG_DECRYPT_ERROR, fatal: true, reason: err.message });
             return;
           });
         })['catch'](function (err) {
-          localthis.hls.trigger(_events2['default'].ERROR, { type: _errors.ErrorTypes.MEDIA_ERROR, details: _errors.ErrorTypes.FRAG_PARSING_ERROR, fatal: true, reason: err.message });
+          _utilsLogger.logger.error('decrypting error : ' + err.message);
+          localthis.hls.trigger(_events2['default'].ERROR, { type: _errors.ErrorTypes.MEDIA_ERROR, details: _errors.ErrorDetails.FRAG_DECRYPT_ERROR, fatal: true, reason: err.message });
           return;
         });
       } else {
@@ -2577,9 +2578,6 @@ var ExpGolomb = (function () {
         frameCropBottomOffset = this.readUEG();
       }
       return {
-        profileIdc: profileIdc,
-        profileCompat: profileCompat,
-        levelIdc: levelIdc,
         width: (picWidthInMbsMinus1 + 1) * 16 - frameCropLeftOffset * 2 - frameCropRightOffset * 2,
         height: (2 - frameMbsOnlyFlag) * (picHeightInMapUnitsMinus1 + 1) * 16 - frameCropTopOffset * 2 - frameCropBottomOffset * 2
       };
@@ -2976,9 +2974,6 @@ var TSDemuxer = (function () {
               var config = expGolombDecoder.readSPS();
               track.width = config.width;
               track.height = config.height;
-              track.profileIdc = config.profileIdc;
-              track.profileCompat = config.profileCompat;
-              track.levelIdc = config.levelIdc;
               track.sps = [unit.data];
               track.timescale = _this.remuxer.timescale;
               track.duration = _this.remuxer.timescale * _this._duration;
@@ -3374,6 +3369,8 @@ var ErrorDetails = {
   FRAG_LOOP_LOADING_ERROR: 'fragLoopLoadingError',
   // Identifier for fragment load timeout error - data: { frag : fragment object}
   FRAG_LOAD_TIMEOUT: 'fragLoadTimeOut',
+  // Identifier for a fragment decryption error event - data: parsing error description
+  FRAG_DECRYPT_ERROR: 'fragDecryptError',
   // Identifier for a fragment parsing error event - data: parsing error description
   FRAG_PARSING_ERROR: 'fragParsingError',
   // Identifier for a fragment appending error event - data: appending error description
@@ -4453,6 +4450,7 @@ module.exports = exports['default'];
  * Generate MP4 Box
 */
 
+//import Hex from '../utils/hex';
 'use strict';
 
 Object.defineProperty(exports, '__esModule', {
@@ -4727,19 +4725,37 @@ var MP4 = (function () {
     value: function avc1(track) {
       var sps = [],
           pps = [],
-          i;
+          i,
+          data,
+          len;
       // assemble the SPSs
+
       for (i = 0; i < track.sps.length; i++) {
-        sps.push(track.sps[i].byteLength >>> 8 & 0xFF);
-        sps.push(track.sps[i].byteLength & 0xFF); // sequenceParameterSetLength
-        sps = sps.concat(Array.prototype.slice.call(track.sps[i])); // SPS
+        data = track.sps[i];
+        len = data.byteLength;
+        sps.push(len >>> 8 & 0xFF);
+        sps.push(len & 0xFF);
+        sps = sps.concat(Array.prototype.slice.call(data)); // SPS
       }
+
       // assemble the PPSs
       for (i = 0; i < track.pps.length; i++) {
-        pps.push(track.pps[i].byteLength >>> 8 & 0xFF);
-        pps.push(track.pps[i].byteLength & 0xFF);
-        pps = pps.concat(Array.prototype.slice.call(track.pps[i]));
+        data = track.pps[i];
+        len = data.byteLength;
+        pps.push(len >>> 8 & 0xFF);
+        pps.push(len & 0xFF);
+        pps = pps.concat(Array.prototype.slice.call(data));
       }
+
+      var avcc = MP4.box(MP4.types.avcC, new Uint8Array([0x01, // version
+      sps[3], // profile
+      sps[4], // profile compat
+      sps[5], // level
+      0xfc | 3, // lengthSizeMinusOne, hard-coded to 4 bytes
+      0xE0 | track.sps.length // 3bit reserved (111) + numOfSequenceParameterSets
+      ].concat(sps).concat([track.pps.length // numOfPictureParameterSets
+      ]).concat(pps))); // "PPS"
+      //console.log('avcc:' + Hex.hexDump(avcc));
       return MP4.box(MP4.types.avc1, new Uint8Array([0x00, 0x00, 0x00, // reserved
       0x00, 0x00, 0x00, // reserved
       0x00, 0x01, // data_reference_index
@@ -4755,15 +4771,7 @@ var MP4 = (function () {
       0x13, 0x76, 0x69, 0x64, 0x65, 0x6f, 0x6a, 0x73, 0x2d, 0x63, 0x6f, 0x6e, 0x74, 0x72, 0x69, 0x62, 0x2d, 0x68, 0x6c, 0x73, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // compressorname
       0x00, 0x18, // depth = 24
       0x11, 0x11]), // pre_defined = -1
-      MP4.box(MP4.types.avcC, new Uint8Array([0x01, // configurationVersion
-      track.profileIdc, // AVCProfileIndication
-      track.profileCompat, // profile_compatibility
-      track.levelIdc, // AVCLevelIndication
-      0xff // lengthSizeMinusOne, hard-coded to 4 bytes
-      ].concat([track.sps.length // numOfSequenceParameterSets
-      ]).concat(sps).concat([track.pps.length // numOfPictureParameterSets
-      ]).concat(pps))), // "PPS"
-      MP4.box(MP4.types.btrt, new Uint8Array([0x00, 0x1c, 0x9c, 0x80, // bufferSizeDB
+      avcc, MP4.box(MP4.types.btrt, new Uint8Array([0x00, 0x1c, 0x9c, 0x80, // bufferSizeDB
       0x00, 0x2d, 0xc6, 0xc0, // maxBitrate
       0x00, 0x2d, 0xc6, 0xc0])) // avgBitrate
       );
@@ -5224,7 +5232,7 @@ var MP4Remuxer = (function () {
           // we use DTS to compute sample duration, but we use PTS to compute initPTS which is used to sync audio and video
           mp4Sample.duration = (dtsnorm - lastDTS) / pes2mp4ScaleFactor;
           if (mp4Sample.duration < 0) {
-            //logger.log('invalid sample duration at PTS/DTS::' + aacSample.pts + '/' + aacSample.dts + ':' + mp4Sample.duration);
+            _utilsLogger.logger.log('invalid AAC sample duration at PTS:' + aacSample.pts + ':' + mp4Sample.duration);
             mp4Sample.duration = 0;
           }
         } else {
@@ -5238,11 +5246,11 @@ var MP4Remuxer = (function () {
             // log delta
             if (delta) {
               if (delta > 1) {
-                _utilsLogger.logger.log('AAC:' + delta + ' ms hole between fragments detected,filling it');
+                _utilsLogger.logger.log(delta + ' ms hole between AAC samples detected,filling it');
                 // set PTS to next PTS, and ensure PTS is greater or equal than last DTS
-                //logger.log('Audio/PTS/DTS adjusted:' + aacSample.pts + '/' + aacSample.dts);
               } else if (delta < -1) {
-                  _utilsLogger.logger.log('AAC:' + -delta + ' ms overlapping between fragments detected');
+                  _utilsLogger.logger.log(-delta + ' ms overlapping between AAC samples detected, dropping it');
+                  continue;
                 }
               // set DTS to next DTS
               ptsnorm = dtsnorm = nextAacPts;
